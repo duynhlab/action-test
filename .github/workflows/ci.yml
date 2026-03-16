@@ -109,7 +109,7 @@ jobs:
   notify:
     if: always()
     needs: [pr-checks, go-check, sonar, docker-build, trivy-scan, docker-sign, docker-db-init]
-    uses: duyhenryer/shared-workflows/.github/workflows/status.yml@beta
+    uses: duyhenryer/shared-workflows/.github/workflows/status.yml@main
     with:
       slack_channel_id: "C0AD82A9A74"
       slack_thread_ts: ${{ needs.pr-checks.outputs.slack_thread_ts }}
