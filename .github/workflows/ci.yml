@@ -41,8 +41,8 @@ jobs:
     needs: go-check
     uses: duyhenryer/shared-workflows/.github/workflows/sonarqube.yml@beta
     with:
-      project-key: 'duynhlab_action-test'
-      organization: 'duynhlab'
+      project-key: "${{ github.repository_owner }}_${{ github.event.repository.name }}"
+      organization: "${{ github.repository_owner }}"
       fail-on-quality-gate: false
     secrets:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
@@ -53,7 +53,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     uses: duyhenryer/shared-workflows/.github/workflows/docker-build-go.yml@beta
     with:
-      image-name: 'shipping'
+      image-name: "${{ github.event.repository.name }}"
       push: true
     secrets: inherit
     permissions:
@@ -66,7 +66,7 @@ jobs:
     needs: [docker-build]
     uses: duyhenryer/shared-workflows/.github/workflows/trivy-scan.yml@beta
     with:
-      image-ref: ghcr.io/${{ github.repository }}/shipping@${{ needs.docker-build.outputs.digest }}
+      image-ref: ghcr.io/${{ github.repository }}/${{ github.event.repository.name }}@${{ needs.docker-build.outputs.digest }}
       severity: 'CRITICAL,HIGH'
       exit-code: '1'
       ignore-unfixed: true
@@ -89,27 +89,13 @@ jobs:
       packages: write
       id-token: write
 
-  # 4d. Build Migration Image (build only, no scan/sign)
-  docker-db-init:
-    needs: [go-check, sonar]
-    if: github.ref == 'refs/heads/main'
-    uses: duyhenryer/shared-workflows/.github/workflows/docker-build-go.yml@beta
-    with:
-      image-name: 'shipping-init'
-      dockerfile: 'db/migrations/Dockerfile'
-      context: 'db/migrations'
-      push: true
-    secrets: inherit
-    permissions:
-      contents: read
-      packages: write
-      actions: read
+  # 4d. Build Migration Image - REMOVED (Simplifying for testing)
 
   # 5. Final Status Notification
   notify:
     if: always()
-    needs: [pr-checks, go-check, sonar, docker-build, trivy-scan, docker-sign, docker-db-init]
-    uses: duyhenryer/shared-workflows/.github/workflows/status.yml@main
+    needs: [pr-checks, go-check, sonar, docker-build, trivy-scan, docker-sign]
+    uses: duyhenryer/shared-workflows/.github/workflows/status.yml@beta
     with:
       slack_channel_id: "C0AD82A9A74"
       slack_thread_ts: ${{ needs.pr-checks.outputs.slack_thread_ts }}
