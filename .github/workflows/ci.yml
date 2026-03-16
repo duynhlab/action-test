@@ -89,12 +89,26 @@ jobs:
       packages: write
       id-token: write
 
-  # 4d. Build Migration Image - REMOVED (Simplifying for testing)
+  # 4d. Build Migration Image (build only, no scan/sign)
+  docker-db-init:
+    needs: [go-check, sonar]
+    if: github.ref == 'refs/heads/main'
+    uses: duyhenryer/shared-workflows/.github/workflows/docker-build-go.yml@beta
+    with:
+      image-name: 'shipping-init'
+      dockerfile: 'db/migrations/Dockerfile'
+      context: 'db/migrations'
+      push: true
+    secrets: inherit
+    permissions:
+      contents: read
+      packages: write
+      actions: read
 
   # 5. Final Status Notification
   notify:
     if: always()
-    needs: [pr-checks, go-check, sonar, docker-build, trivy-scan, docker-sign]
+    needs: [pr-checks, go-check, sonar, docker-build, trivy-scan, docker-sign, docker-db-init]
     uses: duyhenryer/shared-workflows/.github/workflows/status.yml@beta
     with:
       slack_channel_id: "C0AD82A9A74"
