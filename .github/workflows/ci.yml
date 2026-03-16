@@ -41,7 +41,7 @@ jobs:
     needs: go-check
     uses: duyhenryer/shared-workflows/.github/workflows/sonarqube.yml@beta
     with:
-      project-key: 'duynhlab_shipping-service'
+      project-key: 'duynhlab_action-test'
       organization: 'duynhlab'
       fail-on-quality-gate: false
     secrets:
