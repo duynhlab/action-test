@@ -28,6 +28,13 @@ jobs:
     secrets:
       SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
 
+  # 1b. Secret Scan
+  gitleaks:
+    uses: duyhenryer/shared-workflows/.github/workflows/gitleaks.yml@main
+    permissions:
+      contents: read
+      security-events: write
+
   # 2. Test & Lint
   go-check:
     uses: duyhenryer/shared-workflows/.github/workflows/go-check.yml@main
@@ -108,7 +115,7 @@ jobs:
   # 5. Final Status Notification
   notify:
     if: always()
-    needs: [pr-checks, go-check, sonar, docker-build, trivy-scan, docker-sign, docker-db-init]
+    needs: [pr-checks, gitleaks, go-check, sonar, docker-build, trivy-scan, docker-sign, docker-db-init]
     uses: duyhenryer/shared-workflows/.github/workflows/status.yml@main
     with:
       slack_channel_id: "C0AD82A9A74"
