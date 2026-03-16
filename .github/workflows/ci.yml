@@ -95,7 +95,7 @@ jobs:
     if: github.ref == 'refs/heads/main'
     uses: duyhenryer/shared-workflows/.github/workflows/docker-build-go.yml@beta
     with:
-      image-name: 'shipping-init'
+      image-name: "${{ github.event.repository.name }}-init"
       dockerfile: 'db/migrations/Dockerfile'
       context: 'db/migrations'
       push: true
