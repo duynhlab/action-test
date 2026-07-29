@@ -1,0 +1,31 @@
+# E5 canary (workflow position) — deliberately OLD action ref.
+#
+# The same old ref (actions/checkout@v5, latest major is v7) sits in two places:
+#   1. here, inside .github/workflows/          <- Dependabot documented scope
+#   2. .github/actions/dep-probe/action.yml     <- claimed blind spot
+#
+# Round 1 runs the exact dependabot.yml that gha-workflows uses (directory "/").
+# If the blind-spot claim is right, Dependabot opens a bump PR for THIS file and
+# nothing for the composite. Round 2 switches to a directories glob and the
+# composite should get its own PR.
+#
+# The workflow never needs to run — it only needs to be scanned. manual trigger
+# only, and the job is inert.
+
+name: Dep canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Old checkout (canary)
+        uses: actions/checkout@v5
+      - name: Inert
+        run: echo "canary only — never meant to run"

@@ -1,0 +1,11 @@
+# E5 round 1 — exact replica of duynhlab/gha-workflows .github/dependabot.yml.
+# Claim under test: `directory: "/"` scans .github/workflows plus a root
+# action.yml only, so .github/actions/*/action.yml is a blind spot.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+      time: "06:00"
+      timezone: "Asia/Ho_Chi_Minh"

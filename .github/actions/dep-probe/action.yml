@@ -1,0 +1,16 @@
+# E5 canary (composite-action position) — the SAME old ref as dep-canary.yml.
+# If Dependabot's `directory: "/"` config really skips .github/actions/*, this
+# file never gets a bump PR in round 1.
+name: Dep probe
+description: >
+  Canary composite action for the Dependabot coverage experiment. Carries a
+  deliberately old pinned action; never meant to be executed.
+
+runs:
+  using: composite
+  steps:
+    - name: Old checkout (canary, composite position)
+      uses: actions/checkout@v5
+    - name: Inert
+      shell: bash
+      run: echo "canary only"
