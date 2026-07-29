@@ -10,7 +10,7 @@ runs:
   using: composite
   steps:
     - name: Old checkout (canary, composite position)
-      uses: actions/checkout@v5
+      uses: actions/checkout@v7
     - name: Inert
       shell: bash
       run: echo "canary only"
