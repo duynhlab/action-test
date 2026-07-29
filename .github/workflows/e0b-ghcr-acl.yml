@@ -24,6 +24,10 @@ on:
 permissions:
   contents: read
   packages: write
+  pull-requests: read
+  id-token: write
+  actions: read
+  security-events: write
 
 jobs:
   acl:
@@ -112,4 +116,27 @@ jobs:
           exists "other-name"       "ghcr.io/duynhlab/action-test/probe-3level"
           exists "two-level"        "ghcr.io/duynhlab/action-test"
           exists "e1"               "ghcr.io/duynhlab/action-test/e1"
+          exit 0
+
+      # Retest the write path now that the workflow requests the full permission
+      # set (contents/packages/pull-requests/id-token/actions/security-events).
+      # Expectation: unchanged. A workflow token cannot widen a package ACL, and
+      # packages: write was already granted on the run that got denied. Testing
+      # rather than asserting.
+      - name: Retest write with the full permission set
+        run: |
+          set -uo pipefail
+          printf 'FROM alpine:3.21\nRUN echo acl > /acl\n' > Dockerfile.acl
+          docker build -q -f Dockerfile.acl -t acl:local . >/dev/null
+          docker tag acl:local ghcr.io/duynhlab/action-test/action-test:acl-retest
+          set +e
+          out=$(docker push ghcr.io/duynhlab/action-test/action-test:acl-retest 2>&1)
+          rc=$?
+          set -e
+          msg=$(printf '%s' "$out" | tr '\n' ' ' | sed 's/  */ /g' | tail -c 200)
+          if [ "$rc" -eq 0 ]; then
+            echo "::warning::RETEST full-permissions | PUSH SUCCEEDED - permissions were the cause"
+          else
+            echo "::warning::RETEST full-permissions | still denied rc=${rc} | ${msg}"
+          fi
           exit 0

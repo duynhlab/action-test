@@ -1,0 +1,220 @@
+# E2 — falsification test for the "stale base layer keeps a fixed CVE alive"
+# hypothesis (research §2.5).
+#
+# I wrote that hypothesis from reading the workflow, then spotted a hole in my own
+# reasoning: every Actions run gets a fresh buildx builder with an empty local
+# store, so BuildKit has to resolve the base tag from the registry. If it
+# resolves to a new digest the cache key changes, the layer cache misses, and the
+# stale base never happens. This experiment is built to settle that either way.
+#
+# Five sequential JOBS, not steps, so each phase gets a fresh runner and a fresh
+# builder. The registry cache is then the only state carried between phases —
+# exactly the production condition.
+#
+#   base-v1  push e2base:latest  (old package set)
+#   app-a    build app, cache-to, count CVEs           <- baseline
+#   base-v2  push e2base:latest  (apk upgrade, SAME tag)
+#   app-b    build app, no pull, count CVEs            <- stale or not?
+#   app-c    build app, pull: true, count CVEs         <- control
+#
+# Reading the result:
+#   B == A and C < B  -> §2.5 holds, stale base is real
+#   B == C < A        -> §2.5 is WRONG, BuildKit re-resolves on a fresh runner
+#
+# Image name is e2*, not the repo name: ghcr.io/duynhlab/action-test/action-test
+# is an existing package this token cannot touch (see E0b).
+
+name: E2 stale base
+
+on:
+  push:
+    branches: [probe]
+    paths: ['.github/workflows/e2-stale-base.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: read
+  id-token: write
+  actions: read
+  security-events: write
+
+env:
+  BASE: ghcr.io/duynhlab/action-test/e2base
+  APP: ghcr.io/duynhlab/action-test/e2app
+
+jobs:
+  base-v1:
+    name: Phase 1 - base without upgrade
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+      - name: Push base (UPGRADE=false)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: e2
+          file: e2/base.Dockerfile
+          push: true
+          tags: ${{ env.BASE }}:latest
+          build-args: UPGRADE=false
+          provenance: false
+      - name: Report base digest
+        run: echo "::warning::E2 phase1 base digest=$(crane digest "${BASE}:latest")"
+
+  app-a:
+    name: Phase 2 - app A baseline
+    needs: [base-v1]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+      - name: Build app A (seeds the registry cache)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: e2/app.Dockerfile
+          push: true
+          tags: ${{ env.APP }}:a
+          cache-from: type=registry,ref=${{ env.APP }}:cache
+          cache-to: type=registry,ref=${{ env.APP }}:cache,mode=max
+          provenance: false
+      - name: Scan A
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.APP }}:a
+          format: json
+          output: trivy-a.json
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '0'
+          ignore-unfixed: true
+      - name: Report A
+        run: |
+          set -uo pipefail
+          c=$(jq '[.Results[]?|.Vulnerabilities[]?|select(.Severity=="CRITICAL")]|length' trivy-a.json)
+          h=$(jq '[.Results[]?|.Vulnerabilities[]?|select(.Severity=="HIGH")]|length' trivy-a.json)
+          m=$(jq '[.Results[]?|.Vulnerabilities[]?|select(.Severity=="MEDIUM")]|length' trivy-a.json)
+          echo "::warning::E2 A baseline | base=$(crane digest "${BASE}:latest") | CRITICAL=${c} HIGH=${h} MEDIUM=${m}"
+
+  base-v2:
+    name: Phase 3 - base with upgrade, same tag
+    needs: [app-a]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+      - name: Push base (UPGRADE=true) over the SAME tag
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: e2
+          file: e2/base.Dockerfile
+          push: true
+          tags: ${{ env.BASE }}:latest
+          build-args: UPGRADE=true
+          provenance: false
+          no-cache: true
+      - name: Report new base digest
+        run: echo "::warning::E2 phase3 base digest=$(crane digest "${BASE}:latest")"
+
+  app-b:
+    name: Phase 4 - app B without pull
+    needs: [base-v2]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+      - name: Build app B (cache-from only, NO pull)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: e2/app.Dockerfile
+          push: true
+          tags: ${{ env.APP }}:b
+          cache-from: type=registry,ref=${{ env.APP }}:cache
+          provenance: false
+      - name: Scan B
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.APP }}:b
+          format: json
+          output: trivy-b.json
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '0'
+          ignore-unfixed: true
+      - name: Report B
+        run: |
+          set -uo pipefail
+          c=$(jq '[.Results[]?|.Vulnerabilities[]?|select(.Severity=="CRITICAL")]|length' trivy-b.json)
+          h=$(jq '[.Results[]?|.Vulnerabilities[]?|select(.Severity=="HIGH")]|length' trivy-b.json)
+          m=$(jq '[.Results[]?|.Vulnerabilities[]?|select(.Severity=="MEDIUM")]|length' trivy-b.json)
+          echo "::warning::E2 B no-pull | base=$(crane digest "${BASE}:latest") | CRITICAL=${c} HIGH=${h} MEDIUM=${m}"
+
+  app-c:
+    name: Phase 5 - app C with pull true
+    needs: [app-b]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+      - name: Build app C (cache-from plus pull true)
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: e2/app.Dockerfile
+          push: true
+          tags: ${{ env.APP }}:c
+          cache-from: type=registry,ref=${{ env.APP }}:cache
+          pull: true
+          provenance: false
+      - name: Scan C
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.APP }}:c
+          format: json
+          output: trivy-c.json
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '0'
+          ignore-unfixed: true
+      - name: Report C
+        run: |
+          set -uo pipefail
+          c=$(jq '[.Results[]?|.Vulnerabilities[]?|select(.Severity=="CRITICAL")]|length' trivy-c.json)
+          h=$(jq '[.Results[]?|.Vulnerabilities[]?|select(.Severity=="HIGH")]|length' trivy-c.json)
+          m=$(jq '[.Results[]?|.Vulnerabilities[]?|select(.Severity=="MEDIUM")]|length' trivy-c.json)
+          echo "::warning::E2 C with-pull | base=$(crane digest "${BASE}:latest") | CRITICAL=${c} HIGH=${h} MEDIUM=${m}"
