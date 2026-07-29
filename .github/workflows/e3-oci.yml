@@ -1,0 +1,266 @@
+# E3 — the OCI questions still unmeasured after §0.2.
+#
+# §0.2 already disproved my claim that images were not OCI: they are. What is
+# still untested is everything above that, which is exactly what "bổ sung OCI"
+# would mean in practice:
+#
+#   Job 1 (bậc 3): oci-artifact=true turns attestations into OCI referrers.
+#     - does the attestation manifest gain artifactType + subject?
+#     - does GHCR implement the OCI 1.1 Referrers API at all?
+#     - can Trivy then read the SBOM via --sbom-sources oci and skip pulling
+#       layers? (the claimed speedup)
+#
+#   Job 2 (phương án B): export an OCI layout, scan the bytes locally, then push
+#     those exact bytes with crane. Byte-identical from scan to deploy, and
+#     nothing unverified ever reaches the registry.
+#     - does the digest survive export -> scan -> push?
+#     - does trivy --input handle a multi-manifest OCI layout?
+#
+# Results go out as ::warning:: annotations: Actions log and summary blobs are
+# unreachable from the analysis environment, the annotations API is not.
+
+name: E3 OCI
+
+on:
+  push:
+    branches: [probe]
+    paths: ['.github/workflows/e3-oci.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: read
+  id-token: write
+  actions: read
+  security-events: write
+
+env:
+  IMAGE: ghcr.io/duynhlab/action-test/e3
+
+jobs:
+  oci-artifact:
+    name: Bậc 3 - oci-artifact and referrers
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+
+      - name: Install Trivy CLI
+        run: |
+          set -euo pipefail
+          # The action wrapper exposes no --sbom-sources or --input flag, so use
+          # the CLI directly. It reads ~/.docker/config.json for registry auth.
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.68.0
+          trivy --version
+
+      # Baseline: default attestation storage (what the repo does today).
+      - name: Build baseline (default attestations)
+        id: base
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:attest-default
+          provenance: true
+          sbom: true
+
+      # Same build, but attestations formatted as OCI artifacts.
+      - name: Build with oci-artifact=true
+        id: art
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: Dockerfile
+          tags: ${{ env.IMAGE }}:attest-ociartifact
+          outputs: type=image,push=true,oci-artifact=true
+          provenance: true
+          sbom: true
+
+      - name: Compare attestation manifest shape
+        run: |
+          set -uo pipefail
+
+          shape() {
+            label="$1"; ref="$2"
+            set +e
+            raw=$(crane manifest "$ref" 2>&1); rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              echo "::warning::E3 shape ${label} | crane failed: $(printf '%s' "$raw" | tr '\n' ' ' | tail -c 150)"
+              return 0
+            fi
+            top=$(printf '%s' "$raw" | jq -r '.mediaType // "none"')
+            echo "::warning::E3 shape ${label} top=${top}"
+            # Attestation manifests are the ones on the unknown/unknown platform.
+            kids=$(printf '%s' "$raw" | jq -r '
+              (.manifests // []) | map(
+                "plat=\(.platform.os // "?")/\(.platform.architecture // "?") art=\(.artifactType // "NONE")"
+              ) | join(" ;; ")')
+            echo "::warning::E3 shape ${label} children=${kids}"
+          }
+
+          shape "default"     "${IMAGE}:attest-default"
+          shape "ociartifact" "${IMAGE}:attest-ociartifact"
+
+          # Does the attestation manifest carry a subject (i.e. is it a referrer)?
+          for t in attest-default attest-ociartifact; do
+            set +e
+            d=$(crane manifest "${IMAGE}:${t}" 2>/dev/null | jq -r '(.manifests // []) | map(select(.platform.architecture=="unknown")) | .[0].digest // empty')
+            set -e
+            if [ -z "$d" ]; then
+              echo "::warning::E3 subject ${t} | no attestation manifest found"
+              continue
+            fi
+            set +e
+            sub=$(crane manifest "${IMAGE}@${d}" 2>/dev/null | jq -c '{artifactType: (.artifactType // "NONE"), subject: (if .subject then .subject.digest else "NONE" end)}')
+            set -e
+            echo "::warning::E3 subject ${t} | attmanifest=${d} | ${sub:-undecodable}"
+          done
+
+      - name: Does GHCR implement the Referrers API
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          tok=$(curl -sS -u "token:${GH_TOKEN}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:duynhlab/action-test/e3:pull" \
+            | jq -r '.token // empty')
+          if [ -z "$tok" ]; then
+            echo "::warning::E3 referrers | could not obtain a pull token"
+            exit 0
+          fi
+
+          for t in attest-default attest-ociartifact; do
+            set +e
+            dg=$(crane digest "${IMAGE}:${t}" 2>/dev/null)
+            set -e
+            [ -z "$dg" ] && { echo "::warning::E3 referrers ${t} | no digest"; continue; }
+            code=$(curl -sS -o /tmp/ref.json -w '%{http_code}' \
+              -H "Authorization: Bearer ${tok}" \
+              "https://ghcr.io/v2/duynhlab/action-test/e3/referrers/${dg}")
+            n=$(jq -r '(.manifests // []) | length' /tmp/ref.json 2>/dev/null || echo "?")
+            echo "::warning::E3 referrers ${t} | HTTP ${code} | manifests=${n}"
+          done
+          exit 0
+
+      - name: Can Trivy use the SBOM instead of pulling layers
+        run: |
+          set -uo pipefail
+
+          measure() {
+            label="$1"; ref="$2"; shift 2
+            start=$(date +%s)
+            set +e
+            out=$(trivy image --quiet --scanners vuln --format json "$@" "$ref" 2>&1)
+            rc=$?
+            set -e
+            end=$(date +%s)
+            if [ "$rc" -ne 0 ]; then
+              echo "::warning::E3 trivy ${label} | rc=${rc} | $(printf '%s' "$out" | tr '\n' ' ' | tail -c 200)"
+              return 0
+            fi
+            total=$(printf '%s' "$out" | jq '[.Results[]?|.Vulnerabilities[]?]|length' 2>/dev/null || echo "?")
+            echo "::warning::E3 trivy ${label} | $((end-start))s | findings=${total}"
+          }
+
+          measure "plain-default"    "${IMAGE}:attest-default"
+          measure "sbomsrc-default"  "${IMAGE}:attest-default"     --sbom-sources oci
+          measure "sbomsrc-artifact" "${IMAGE}:attest-ociartifact" --sbom-sources oci
+          exit 0
+
+  oci-layout:
+    name: Phương án B - OCI layout export
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+
+      - name: Install Trivy CLI
+        run: |
+          set -euo pipefail
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
+            | sh -s -- -b /usr/local/bin v0.68.0
+
+      - name: Build to an OCI layout directory (no push)
+        id: layout
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: Dockerfile
+          tags: ${{ env.IMAGE }}:from-oci-layout
+          outputs: type=oci,dest=/tmp/ocilayout,tar=false
+          provenance: true
+
+      - name: Inspect the layout and record the digest before pushing
+        id: pre
+        env:
+          ACTION_DIGEST: ${{ steps.layout.outputs.digest }}
+        run: |
+          set -uo pipefail
+          echo "::warning::E3 layout | action digest output='${ACTION_DIGEST:-EMPTY}'"
+          if [ -f /tmp/ocilayout/index.json ]; then
+            top=$(jq -r '.manifests[0].mediaType // "none"' /tmp/ocilayout/index.json)
+            dg=$(jq -r '.manifests[0].digest // "none"' /tmp/ocilayout/index.json)
+            echo "::warning::E3 layout | index.json top=${top} digest=${dg}"
+            echo "digest=${dg}" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::E3 layout | NO index.json - dest is not a directory layout"
+            ls -la /tmp/ocilayout 2>&1 | head -5
+          fi
+
+      - name: Scan the layout locally
+        run: |
+          set -uo pipefail
+          start=$(date +%s)
+          set +e
+          out=$(trivy image --quiet --scanners vuln --format json --input /tmp/ocilayout 2>&1)
+          rc=$?
+          set -e
+          end=$(date +%s)
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::E3 layout-scan | rc=${rc} | $(printf '%s' "$out" | tr '\n' ' ' | tail -c 250)"
+            exit 0
+          fi
+          h=$(printf '%s' "$out" | jq '[.Results[]?|.Vulnerabilities[]?|select(.Severity=="HIGH")]|length')
+          c=$(printf '%s' "$out" | jq '[.Results[]?|.Vulnerabilities[]?|select(.Severity=="CRITICAL")]|length')
+          echo "::warning::E3 layout-scan | $((end-start))s | CRITICAL=${c} HIGH=${h}"
+          exit 0
+
+      - name: Push the exact bytes with crane and compare digests
+        env:
+          PRE_DIGEST: ${{ steps.pre.outputs.digest }}
+        run: |
+          set -uo pipefail
+          set +e
+          out=$(crane push --index /tmp/ocilayout "${IMAGE}:from-oci-layout" 2>&1)
+          rc=$?
+          set -e
+          if [ "$rc" -ne 0 ]; then
+            echo "::warning::E3 layout-push | rc=${rc} | $(printf '%s' "$out" | tr '\n' ' ' | tail -c 250)"
+            exit 0
+          fi
+          after=$(crane digest "${IMAGE}:from-oci-layout")
+          if [ "${PRE_DIGEST:-}" = "$after" ]; then
+            echo "::warning::E3 layout-push | digest PRESERVED end-to-end (${after})"
+          else
+            echo "::warning::E3 layout-push | digest CHANGED before=${PRE_DIGEST:-EMPTY} after=${after}"
+          fi
+          exit 0
