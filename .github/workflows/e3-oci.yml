@@ -53,14 +53,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
 
+      # The trivy-action wrapper exposes no --sbom-sources or --input flag, so
+      # install the CLI. setup-trivy is the official installer; the raw
+      # install.sh with a non-existent version tag is what failed the first run.
       - name: Install Trivy CLI
-        run: |
-          set -euo pipefail
-          # The action wrapper exposes no --sbom-sources or --input flag, so use
-          # the CLI directly. It reads ~/.docker/config.json for registry auth.
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b /usr/local/bin v0.68.0
-          trivy --version
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.72.0
+      - name: Show Trivy version
+        run: trivy --version
 
       # Baseline: default attestation storage (what the repo does today).
       - name: Build baseline (default attestations)
@@ -194,10 +195,9 @@ jobs:
       - uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
 
       - name: Install Trivy CLI
-        run: |
-          set -euo pipefail
-          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh \
-            | sh -s -- -b /usr/local/bin v0.68.0
+        uses: aquasecurity/setup-trivy@81e514348e19b6112ce2a7e3ecbafe19c1e1f567 # v0.3.1
+        with:
+          version: v0.72.0
 
       - name: Build to an OCI layout directory (no push)
         id: layout
