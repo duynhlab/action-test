@@ -110,3 +110,36 @@ jobs:
         run: |
           set -euo pipefail
           echo "::warning::CTX actor=${{ github.actor }} | repository_owner=${{ github.repository_owner }} | repository=${{ github.repository }}"
+
+      # probe-3level pushed fine while action-test/action-test was denied, so the
+      # namespace itself is writable and something is specific to that one name.
+      # List what already exists to find out what.
+      - name: List existing container packages
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          show() {
+            label="$1"
+            url="$2"
+            set +e
+            body=$(curl -sS -H "Authorization: Bearer ${GH_TOKEN}" \
+                        -H "Accept: application/vnd.github+json" "$url")
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              echo "::warning::PKG ${label} | curl rc=${rc}"
+              return 0
+            fi
+            summary=$(printf '%s' "$body" | jq -r '
+              if type=="array" then
+                (map("\(.name)[vis=\(.visibility)][repo=\(.repository.name // "none")]") | join(" ; "))
+              else
+                "ERROR: " + (.message // "unknown")
+              end' | tail -c 400)
+            echo "::warning::PKG ${label} | ${summary}"
+          }
+
+          show "org-containers"  "https://api.github.com/orgs/duynhlab/packages?package_type=container&per_page=100"
+          show "repo-linked"     "https://api.github.com/repos/duynhlab/action-test/packages?package_type=container"
