@@ -1,0 +1,201 @@
+# E1 — measure the digest chain and the media types that docker-build-go.yml
+# actually produces. This is the experiment that decides four research claims:
+#
+#   1. The pushed image is not the image that was scanned (digest differs).
+#   2. Pushed image manifests use Docker media types, not OCI.
+#   3. The registry build cache uses OCI media types.
+#   4. `crane tag` preserves the digest; `buildx imagetools create` does not.
+#
+# Two parts:
+#   Part A reproduces docker-build-go.yml:148-278 verbatim (load -> scan -> push)
+#          and reports whatever digests each exporter yields.
+#   Part B is the controlled comparison: push twice, changing ONLY `provenance`,
+#          so both digests are registry manifest digests and directly comparable.
+#
+# Results go out as ::warning:: annotations because the log and summary blobs are
+# unreachable from the analysis environment while the annotations API is not.
+#
+# Image name is `e1`, not the repo name: pushing to
+# ghcr.io/duynhlab/action-test/action-test is denied with
+# permission_denied: write_package, while other names in the same namespace work.
+
+name: E1 digest and media types
+
+on:
+  push:
+    branches: [probe]
+    paths: ['.github/workflows/e1-digest-mediatype.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/duynhlab/action-test/e1
+
+jobs:
+  measure:
+    name: Measure digests and media types
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up crane
+        uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+
+      # ── Part A: faithful reproduction of the current two-build pattern ──
+
+      - name: A1 build local (load, provenance off)
+        id: a1
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: Dockerfile
+          load: true
+          push: false
+          tags: ${{ env.IMAGE }}:partA
+          provenance: false
+
+      - name: A2 build push (provenance on, cache-to)
+        id: a2
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:partA
+          cache-to: type=registry,ref=${{ env.IMAGE }}:cache-e1,mode=max
+          provenance: true
+
+      - name: A3 report part A
+        env:
+          A1_DIGEST: ${{ steps.a1.outputs.digest }}
+          A1_IMAGEID: ${{ steps.a1.outputs.imageid }}
+          A2_DIGEST: ${{ steps.a2.outputs.digest }}
+        run: |
+          set -uo pipefail
+          echo "::warning::A load-exporter digest='${A1_DIGEST:-EMPTY}' imageid='${A1_IMAGEID:-EMPTY}'"
+          echo "::warning::A push-exporter digest='${A2_DIGEST:-EMPTY}'"
+          if [ -n "${A1_DIGEST:-}" ] && [ "${A1_DIGEST}" = "${A2_DIGEST}" ]; then
+            echo "::warning::A VERDICT digests EQUAL"
+          else
+            echo "::warning::A VERDICT digests DIFFER or load digest unavailable"
+          fi
+
+      # ── Part B: controlled A/B, only `provenance` differs ──
+
+      - name: B1 push with provenance false
+        id: b1
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:prov-off
+          provenance: false
+
+      - name: B2 push with provenance true
+        id: b2
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ env.IMAGE }}:prov-on
+          provenance: true
+
+      - name: B3 report controlled comparison
+        env:
+          B1_DIGEST: ${{ steps.b1.outputs.digest }}
+          B2_DIGEST: ${{ steps.b2.outputs.digest }}
+        run: |
+          set -uo pipefail
+          echo "::warning::B prov-off digest=${B1_DIGEST:-EMPTY}"
+          echo "::warning::B prov-on  digest=${B2_DIGEST:-EMPTY}"
+          if [ "${B1_DIGEST}" = "${B2_DIGEST}" ]; then
+            echo "::warning::B VERDICT provenance does NOT change the digest"
+          else
+            echo "::warning::B VERDICT provenance CHANGES the digest (claim 2.2 holds)"
+          fi
+
+      # ── Media types ──
+
+      - name: C media types
+        run: |
+          set -uo pipefail
+
+          mt() {
+            label="$1"
+            ref="$2"
+            set +e
+            raw=$(crane manifest "$ref" 2>&1)
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              echo "::warning::C ${label} | crane failed: $(printf '%s' "$raw" | tr '\n' ' ' | tail -c 150)"
+              return 0
+            fi
+            top=$(printf '%s' "$raw" | jq -r '.mediaType // "none"')
+            kids=$(printf '%s' "$raw" | jq -r '
+              if .manifests then
+                (.manifests | map("\(.mediaType)|plat=\(.platform.os // "?")/\(.platform.architecture // "?")|art=\(.artifactType // "-")") | join(" ;; "))
+              else "not an index" end')
+            echo "::warning::C ${label} top=${top}"
+            echo "::warning::C ${label} children=${kids}"
+          }
+
+          mt "prov-on"  "${IMAGE}:prov-on"
+          mt "prov-off" "${IMAGE}:prov-off"
+          mt "cache"    "${IMAGE}:cache-e1"
+
+      # ── Promotion primitives ──
+
+      - name: D crane tag vs imagetools create
+        run: |
+          set -uo pipefail
+
+          before=$(crane digest "${IMAGE}:prov-on")
+          echo "::warning::D source digest=${before}"
+
+          set +e
+          crane tag "${IMAGE}:prov-on" promoted-by-crane >/dev/null 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            after=$(crane digest "${IMAGE}:promoted-by-crane")
+            if [ "$before" = "$after" ]; then
+              echo "::warning::D crane tag PRESERVES digest (${after})"
+            else
+              echo "::warning::D crane tag CHANGED digest to ${after}"
+            fi
+          else
+            echo "::warning::D crane tag failed rc=${rc}"
+          fi
+
+          set +e
+          docker buildx imagetools create -t "${IMAGE}:promoted-by-imagetools" "${IMAGE}:prov-on" >/dev/null 2>&1
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            after2=$(crane digest "${IMAGE}:promoted-by-imagetools")
+            if [ "$before" = "$after2" ]; then
+              echo "::warning::D imagetools create PRESERVES digest (${after2})"
+            else
+              echo "::warning::D imagetools create CHANGED digest to ${after2}"
+            fi
+          else
+            echo "::warning::D imagetools create failed rc=${rc}"
+          fi
