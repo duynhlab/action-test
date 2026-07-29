@@ -13,6 +13,17 @@
 #
 # Also checks whether a package already exists at each path, using crane ls.
 
+# RETEST round 2: the repo's Workflow permissions setting was changed from
+# "Read and write" to "Read repository contents and packages permissions", i.e.
+# default_workflow_permissions went write -> read. That is the restrictive
+# default, not the package's "Manage Actions access" list. This round measures
+# two things:
+#   1. does the denied path (action-test/action-test) now work?  expected: no,
+#      it is a package-level ACL that a workflow token cannot widen
+#   2. does the previously-working path (probe-3level) STILL work? this tests
+#      whether a read-only default caps an explicit job-level `permissions:`
+#      elevation, which would be a regression introduced by the setting change
+
 name: E0b GHCR ACL
 
 on:
