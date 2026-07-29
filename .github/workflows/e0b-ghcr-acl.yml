@@ -1,0 +1,115 @@
+# E0b — pin down the name-specific GHCR 403 without a PAT.
+#
+# Facts so far: ghcr.io/duynhlab/action-test/probe-3level pushes fine, while
+# ghcr.io/duynhlab/action-test/action-test is denied with
+# permission_denied: write_package. Same namespace, same token, same path depth.
+# The very first push attempt to that path was already denied, so "the package
+# already existed in a broken state" does not explain it.
+#
+# The GHCR token endpoint does not return a `scope` field, which made the first
+# probe useless. But the token it returns is a JWT whose payload carries an
+# `access` array stating exactly which actions were granted per repository. That
+# is the authoritative answer and needs no PAT.
+#
+# Also checks whether a package already exists at each path, using crane ls.
+
+name: E0b GHCR ACL
+
+on:
+  push:
+    branches: [probe]
+    paths: ['.github/workflows/e0b-ghcr-acl.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  acl:
+    name: Decode GHCR grants
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Set up crane
+        uses: imjasonh/setup-crane@31b88efe9de28ae0ffa220711af4b60be9435f6e # v0.4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Decode what GHCR actually grants
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          # Decode a base64url segment, padding it to a multiple of 4 first.
+          b64url() {
+            data="$1"
+            case $(( ${#data} % 4 )) in
+              2) data="${data}==" ;;
+              3) data="${data}=" ;;
+            esac
+            printf '%s' "$data" | tr '_-' '/+' | base64 -d 2>/dev/null
+          }
+
+          grants() {
+            label="$1"
+            repo="$2"
+            set +e
+            body=$(curl -sS -u "token:${GH_TOKEN}" \
+              "https://ghcr.io/token?service=ghcr.io&scope=repository:${repo}:pull,push")
+            rc=$?
+            set -e
+            if [ "$rc" -ne 0 ]; then
+              echo "::warning::ACL ${label} | curl rc=${rc}"
+              return 0
+            fi
+
+            tok=$(printf '%s' "$body" | jq -r '.token // empty')
+            if [ -z "$tok" ]; then
+              err=$(printf '%s' "$body" | jq -c '.' | tail -c 200)
+              echo "::warning::ACL ${label} | no token | ${err}"
+              return 0
+            fi
+
+            payload=$(printf '%s' "$tok" | cut -d. -f2)
+            claims=$(b64url "$payload")
+            access=$(printf '%s' "$claims" | jq -c '.access // "no access claim"' 2>/dev/null || echo "undecodable")
+            echo "::warning::ACL ${label} | repo=${repo} | access=${access}"
+          }
+
+          grants "app-name-eq-repo" "duynhlab/action-test/action-test"
+          grants "other-name"       "duynhlab/action-test/probe-3level"
+          grants "two-level"        "duynhlab/action-test"
+          grants "db-init-name"     "duynhlab/action-test/action-test-init"
+
+      - name: Does a package already exist at each path
+        run: |
+          set -uo pipefail
+
+          exists() {
+            label="$1"
+            ref="$2"
+            set +e
+            out=$(crane ls "$ref" 2>&1)
+            rc=$?
+            set -e
+            if [ "$rc" -eq 0 ]; then
+              tags=$(printf '%s' "$out" | tr '\n' ' ' | tail -c 200)
+              echo "::warning::LS ${label} | ${ref} | EXISTS tags=[${tags}]"
+            else
+              msg=$(printf '%s' "$out" | tr '\n' ' ' | tail -c 200)
+              echo "::warning::LS ${label} | ${ref} | ${msg}"
+            fi
+          }
+
+          exists "app-name-eq-repo" "ghcr.io/duynhlab/action-test/action-test"
+          exists "other-name"       "ghcr.io/duynhlab/action-test/probe-3level"
+          exists "two-level"        "ghcr.io/duynhlab/action-test"
+          exists "e1"               "ghcr.io/duynhlab/action-test/e1"
+          exit 0
