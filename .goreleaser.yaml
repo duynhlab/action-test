@@ -1,0 +1,50 @@
+version: 2
+
+project_name: action-test
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: action-test
+    main: .
+    binary: bin/action-test
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64]
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+archives:
+  - id: default
+    ids: [action-test]
+    name_template: "{{ .ProjectName }}-{{ .Version }}-{{ .Os }}-{{ .Arch }}"
+    files:
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - artifacts: archive
+
+# Keyless cosign signature over the combined checksum file. The goreleaser.yml
+# reusable workflow installs cosign and grants id-token: write for this.
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sig"
+    certificate: "${artifact}.pem"
+    args:
+      - sign-blob
+      - "--output-signature=${signature}"
+      - "--output-certificate=${certificate}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+
+changelog:
+  use: github

@@ -1,0 +1,106 @@
+# Build template under test — copied from the production template, with two
+# deliberate deviations because this repo has NO secrets:
+#   - the `sonar` job is removed (needs SONAR_TOKEN)
+#   - the `notify` job is removed (needs SLACK_BOT_TOKEN)
+# Consequently `docker-build`, `docker-db-init` and `release-binary` depend on
+# [go-check] instead of [go-check, sonar].
+#
+# Everything else is verbatim, including `scan-exit-code: '1'` — which the
+# research claims is dead code. This run is the measurement of that claim.
+
+name: Build
+
+on:
+  push:
+    branches: [dev, uat, main]
+    tags: ['v*']
+
+permissions:
+  contents: read
+  packages: write
+  pull-requests: read
+  id-token: write
+  actions: read
+  security-events: write
+
+jobs:
+  go-check:
+    uses: duynhlab/gha-workflows/.github/workflows/go-check.yml@main
+    with:
+      command-test: 'go test -race -coverprofile=coverage.out ./...'
+      lint: true
+    secrets: inherit
+
+  gitleaks:
+    uses: duynhlab/gha-workflows/.github/workflows/gitleaks.yml@main
+    permissions:
+      contents: read
+      security-events: write
+
+  docker-build:
+    needs: [go-check]
+    uses: duynhlab/gha-workflows/.github/workflows/docker-build-go.yml@main
+    with:
+      image-name: ${{ github.event.repository.name }}
+      push: true
+      scan-before-push: true
+      scan-severity: 'CRITICAL,HIGH'
+      scan-exit-code: '1'
+    secrets: inherit
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+
+  trivy-report:
+    needs: [docker-build]
+    if: needs.docker-build.outputs.scan-status == 'pass'
+    uses: duynhlab/gha-workflows/.github/workflows/trivy-scan.yml@main
+    with:
+      image-ref: ghcr.io/${{ github.repository }}/${{ github.event.repository.name }}@${{ needs.docker-build.outputs.digest }}
+      severity: 'CRITICAL,HIGH,MEDIUM'
+      exit-code: '0'
+      ignore-unfixed: true
+    secrets: inherit
+    permissions:
+      contents: read
+      packages: read
+      security-events: write
+
+  docker-sign:
+    needs: [docker-build]
+    uses: duynhlab/gha-workflows/.github/workflows/docker-sign.yml@main
+    with:
+      tags: ${{ needs.docker-build.outputs.tags }}
+      digest: ${{ needs.docker-build.outputs.digest }}
+    secrets: inherit
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+  docker-db-init:
+    needs: [go-check]
+    uses: duynhlab/gha-workflows/.github/workflows/docker-build-go.yml@main
+    with:
+      image-name: '${{ github.event.repository.name }}-init'
+      dockerfile: 'db/migrations/Dockerfile'
+      context: 'db/migrations'
+      push: true
+      scan-before-push: true
+      scan-severity: 'CRITICAL,HIGH'
+      scan-exit-code: '1'
+    secrets: inherit
+    permissions:
+      contents: read
+      packages: write
+      actions: read
+
+  release-binary:
+    needs: [go-check]
+    if: startsWith(github.ref, 'refs/tags/v')
+    uses: duynhlab/gha-workflows/.github/workflows/goreleaser.yml@main
+    secrets: inherit
+    permissions:
+      contents: write
+      id-token: write
