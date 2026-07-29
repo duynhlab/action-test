@@ -10,7 +10,13 @@
 
 name: E0 GHCR probe
 
+# Runs on pushes to the `probe` branch. workflow_dispatch is unusable here
+# because GitHub only exposes it once the workflow exists on the default branch,
+# and `build.yml` only triggers on dev/uat/main — so a dedicated branch keeps
+# this diagnostic from kicking off a full build.
 on:
+  push:
+    branches: [probe]
   workflow_dispatch:
 
 permissions:
