@@ -1,0 +1,101 @@
+# Diagnostic: why did "Push image to registry" get 403 from GHCR?
+#
+# The 403 was on a HEAD to /v2/duynhlab/action-test/action-test/blobs/<digest>.
+# A 403 (rather than 404) means the token was not authorised for that repository
+# namespace at all, so this probe asks GHCR directly what scopes it grants, and
+# tests both a 2-level and a 3-level repository path.
+#
+# Everything runs inside the runner because that is where GITHUB_TOKEN has
+# package permissions.
+
+name: E0 GHCR probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  probe:
+    name: GHCR probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Ask GHCR what scopes it grants
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+
+          probe_scope() {
+            label="$1"
+            scope="$2"
+            # GHCR issues a bearer token and echoes back the scope it actually granted.
+            body=$(curl -sS -u "token:${GH_TOKEN}" \
+              "https://ghcr.io/token?service=ghcr.io&scope=${scope}")
+            granted=$(printf '%s' "$body" | jq -r '.scope // "(none returned)"')
+            echo "| \`${label}\` | \`${scope}\` | \`${granted}\` |" >> "$GITHUB_STEP_SUMMARY"
+            echo "requested=${scope} granted=${granted}"
+          }
+
+          {
+            echo "## GHCR granted scopes"
+            echo ""
+            echo "| Path shape | Requested | Granted |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          probe_scope "2-level" "repository:duynhlab/probe-2level:pull,push"
+          probe_scope "3-level" "repository:duynhlab/action-test/probe-3level:pull,push"
+          probe_scope "3-level (real)" "repository:duynhlab/action-test/action-test:pull,push"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@abd2ef45e78c5afb21d64d4ca52ee8550d9572c7 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build a tiny image once
+        run: |
+          set -euo pipefail
+          printf 'FROM alpine:3.21\nRUN echo probe > /probe\n' > Dockerfile.probe
+          docker build -q -f Dockerfile.probe -t probe:local .
+
+      # Each push is independent and must not abort the others.
+      - name: Try pushing to each path shape
+        run: |
+          set -uo pipefail
+
+          try_push() {
+            label="$1"
+            ref="$2"
+            docker tag probe:local "$ref"
+            out=$(docker push "$ref" 2>&1)
+            code=$?
+            if [ "$code" -eq 0 ]; then
+              echo "| \`${label}\` | \`${ref}\` | ✅ pushed |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              # Keep the message on one line so the table stays readable.
+              msg=$(printf '%s' "$out" | tr '\n' ' ' | tail -c 300)
+              echo "| \`${label}\` | \`${ref}\` | ❌ \`${msg}\` |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+            echo "--- ${label} (exit ${code}) ---"
+            printf '%s\n' "$out"
+          }
+
+          {
+            echo ""
+            echo "## Push attempts"
+            echo ""
+            echo "| Path shape | Ref | Result |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # Only push inside this repo's own namespace. A 2-level push would
+          # create an org-level package with no repo link, which needs org admin
+          # to delete — the scope probe above already covers that shape.
+          try_push "3-level"      "ghcr.io/duynhlab/action-test/probe-3level:t1"
+          try_push "3-level real" "ghcr.io/duynhlab/action-test/action-test:probe"
