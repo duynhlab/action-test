@@ -26,6 +26,6 @@ jobs:
     timeout-minutes: 5
     steps:
       - name: Old checkout (canary)
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
       - name: Inert
         run: echo "canary only — never meant to run"
